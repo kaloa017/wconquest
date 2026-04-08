@@ -8,37 +8,72 @@ Note: Username 'Kasper' (any case) auto-gets admin on registration
 
 from flask import Flask, request, jsonify, session, send_file
 import sqlite3, hashlib, random, time, os, json, math
+import urllib.request, threading
+
+# In-memory spectator tracking {ip: {country, flag, last_seen, name}}
+_spectators = {}
+_geo_cache  = {}          # ip -> {'flag': '🇳🇴', 'country': 'Norway'}
+_geo_lock   = threading.Lock()
+
+def _country_flag(code):
+    if not code or len(code) != 2: return '🌐'
+    try: return chr(0x1F1E6+ord(code[0].upper())-65)+chr(0x1F1E6+ord(code[1].upper())-65)
+    except: return '🌐'
+
+def _geolocate(ip):
+    """Return {'flag':..,'country':..} for an IP, cached in memory."""
+    if not ip or ip in ('127.0.0.1','::1'): return {'flag':'🖥','country':'Localhost'}
+    with _geo_lock:
+        if ip in _geo_cache: return _geo_cache[ip]
+    try:
+        url = f'http://ip-api.com/json/{ip}?fields=countryCode,country,status'
+        with urllib.request.urlopen(url, timeout=3) as r:
+            data = json.loads(r.read())
+        if data.get('status') == 'success':
+            result = {'flag': _country_flag(data['countryCode']), 'country': data.get('country','?')}
+        else:
+            result = {'flag':'🌐','country':'Unknown'}
+    except:
+        result = {'flag':'🌐','country':'Unknown'}
+    with _geo_lock:
+        _geo_cache[ip] = result
+    return result
+
+def _touch_spectator(ip):
+    geo = _geolocate(ip)
+    _spectators[ip] = {**geo, 'last_seen': time.time(), 'ip': ip}
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'wc_v3_secret_xK9m_2024_!@#')
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'game.db')
+DB_PATH = os.environ.get('DB_PATH', os.path.join(os.path.dirname(__file__), 'game.db'))
 
 # ── Game Constants ────────────────────────────────────────────────────────────
 GRID            = 0.18     # degrees per cell (~20 km)
-TROOP_COST      = 10       # money per troop
-BOAT_COST       = 1000     # money per boat (single-use overseas landing)
-PLANE_COST      = 1000     # money per plane (single-use overseas strike)
+TROOP_COST      = 8        # money per troop
+BOAT_COST       = 800      # money per boat (single-use overseas landing)
+PLANE_COST      = 1200     # money per plane (single-use overseas strike)
 AUTO_COLLECT_CD = 10       # seconds between auto-accruals per territory
-MAX_ACCUM_MINS  = 60       # max offline accrual cap
+MAX_ACCUM_MINS  = 120      # max offline accrual cap (2hrs)
 WIN_THRESHOLD   = 150      # territories to win a round
 WIN_COUNTDOWN   = 45       # seconds before game resets after win
-CLAIM_COST      = 30       # money required to claim a territory
+CLAIM_COST      = 25       # base claim cost (scales with territory count)
 BOAT_RANGE      = 4        # max cells for naval attack
 PLANE_RANGE_DEF = 5        # default plane range (cells)
 PLANE_RANGE_BLZ = 8        # plane range with blitzkrieg
 
 AUTO_ADMIN_NAMES = {'kasper'}
-SELL_RATES = {'food': 1, 'wood': 2, 'metal': 3, 'oil': 5}
+SELL_RATES = {'food': 2, 'wood': 4, 'metal': 6, 'oil': 10}
 
 TERRAIN_RES = {
-    'plains':    ('food',   6),
-    'forest':    ('wood',   8),
-    'mountains': ('metal',  6),
-    'desert':    ('money',  4),
-    'tundra':    ('metal',  3),
-    'city':      ('money',  15),
-    'oil':       ('oil',    10),
+    'plains':    ('food',   9),
+    'forest':    ('wood',   12),
+    'mountains': ('metal',  9),
+    'desert':    ('money',  7),
+    'tundra':    ('metal',  5),
+    'city':      ('money',  18),
+    'oil':       ('oil',    14),
 }
 
 POP_BASE  = {'city':80000,'plains':3000,'forest':1200,'mountains':800,'desert':300,'tundra':150,'oil':900}
@@ -95,11 +130,11 @@ def init_db():
         created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
         last_seen   INTEGER DEFAULT 0,
         last_claim  INTEGER DEFAULT 0,
-        food        REAL DEFAULT 50,
-        wood        REAL DEFAULT 50,
-        metal       REAL DEFAULT 50,
-        oil         REAL DEFAULT 10,
-        money       REAL DEFAULT 100,
+        food        REAL DEFAULT 100,
+        wood        REAL DEFAULT 100,
+        metal       REAL DEFAULT 100,
+        oil         REAL DEFAULT 25,
+        money       REAL DEFAULT 200,
         color       TEXT DEFAULT '#e74c3c'
     )''')
 
@@ -258,7 +293,7 @@ def def_bonus(research):
 
 def troop_cost(research):
     c = TROOP_COST
-    if 'gunpowder' in research: c = int(c * 0.80)
+    if 'gunpowder' in research: c = max(1, int(c * 0.75))  # 25% discount
     return c
 
 # ── Banning / auth ────────────────────────────────────────────────────────────
@@ -333,26 +368,27 @@ def auto_collect(uid, conn):
 # ── Win-condition check ───────────────────────────────────────────────────────
 
 def check_win(uid, conn):
-    """Win only when every land territory on the map has been claimed by someone."""
+    """Win when a single player reaches WIN_THRESHOLD territories."""
     existing = get_setting(conn,'winner_id')
     if existing: return False
-    # Count total territories in DB vs total owned — win when all are owned
-    totals = conn.execute(
-        'SELECT COUNT(*) total, SUM(CASE WHEN owner_id IS NOT NULL THEN 1 ELSE 0 END) owned FROM territories'
-    ).fetchone()
-    total = totals['total'] or 0
-    owned = totals['owned'] or 0
-    # Need at least 500 territories in the DB (map must be substantially filled) and all owned
-    if total < 500 or owned < total: return False
-    uname = conn.execute('SELECT username FROM users WHERE id=?',(uid,)).fetchone()['username']
-    set_setting(conn,'winner_id',uid)
-    set_setting(conn,'winner_name',uname)
-    set_setting(conn,'win_time',int(time.time()))
+    # Find the player with the most territories
+    leader = conn.execute('''
+        SELECT u.id, u.username, COUNT(t.id) tc FROM users u
+        JOIN territories t ON t.owner_id=u.id
+        WHERE u.is_banned=0
+        GROUP BY u.id
+        ORDER BY tc DESC LIMIT 1
+    ''').fetchone()
+    if not leader or leader['tc'] < WIN_THRESHOLD:
+        return False
+    set_setting(conn,'winner_id', leader['id'])
+    set_setting(conn,'winner_name', leader['username'])
+    set_setting(conn,'win_time', int(time.time()))
     return True
 
 def do_game_reset(conn):
     conn.execute('UPDATE territories SET owner_id=NULL,garrison=0,boats=0,planes=0')
-    conn.execute('UPDATE users SET food=50,wood=50,metal=50,oil=10,money=100,research=\'[]\'')
+    conn.execute('UPDATE users SET food=100,wood=100,metal=100,oil=25,money=200,research=\'[]\'')
     conn.execute("DELETE FROM game_settings WHERE key IN ('winner_id','winner_name','win_time')")
     conn.execute('DELETE FROM battle_log')
     conn.execute("INSERT OR IGNORE INTO announcements (message,author) VALUES ('🔄 A new round has started! Claim territories and conquer the world.','System')")
@@ -552,6 +588,14 @@ def set_pin():
 
 # ── Online players ────────────────────────────────────────────────────────────
 
+@app.route('/api/spectate', methods=['POST'])
+def spectate():
+    """Called by guests to register their presence on the map."""
+    ip = request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
+    if ip:
+        threading.Thread(target=_touch_spectator, args=(ip,), daemon=True).start()
+    return jsonify({'success': True})
+
 @app.route('/api/online')
 def online_users():
     cutoff = int(time.time()) - 180
@@ -563,8 +607,19 @@ def online_users():
         GROUP BY u.id ORDER BY u.last_seen DESC
     ''',(cutoff,)).fetchall()
     conn.close()
-    return jsonify([{'username':r['username'],'color':r['color'],
-                     'is_admin':bool(r['is_admin']),'territories':r['territories']} for r in rows])
+    players = [{'username':r['username'],'color':r['color'],
+                'is_admin':bool(r['is_admin']),'territories':r['territories'],
+                'type':'player'} for r in rows]
+    # Add active spectators (last 3 min, not logged-in players)
+    player_ips = set()  # we don't track player IPs, just avoid double-count
+    now = time.time()
+    guests = []
+    for ip, s in list(_spectators.items()):
+        if now - s['last_seen'] < 180:
+            guests.append({'username': f"{s['flag']} Guest", 'color':'#607090',
+                           'is_admin':False,'territories':0,'type':'spectator',
+                           'flag': s['flag'], 'country': s['country']})
+    return jsonify(players + guests)
 
 # ── Sell resources ────────────────────────────────────────────────────────────
 
@@ -679,7 +734,13 @@ def claim_territory():
 
     # Claim cost check (1000 if player owns 300+ territories, else 30)
     mc = conn.execute('SELECT COUNT(*) c FROM territories WHERE owner_id=?',(session['user_id'],)).fetchone()['c']
-    cost = 1000 if mc >= 300 else CLAIM_COST
+    # Tiered claim cost — scales to slow late-game snowball
+    if mc >= 200:   cost = 1200
+    elif mc >= 100: cost = 400
+    elif mc >= 50:  cost = 150
+    elif mc >= 20:  cost = 80
+    elif mc >= 8:   cost = 40
+    else:           cost = CLAIM_COST
     user_money = conn.execute('SELECT money FROM users WHERE id=?',(session['user_id'],)).fetchone()
     if round(user_money['money']) < cost:
         conn.close(); return jsonify({'error':f'Need {cost}💰 to claim (you have {round(user_money["money"])}💰)'}),400
@@ -775,11 +836,11 @@ def build_boats():
     cost = am * BOAT_COST
     u = conn.execute('SELECT money FROM users WHERE id=?',(session['user_id'],)).fetchone()
     if round(u['money']) < cost:
-        conn.close(); return jsonify({'error':f'Need {cost}\u0029 have {round(u["money"])}\u0029'}),400
+        conn.close(); return jsonify({'error':f'Need {cost}💰, have {round(u["money"])}💰'}),400
     conn.execute('UPDATE users SET money=money-? WHERE id=?',(cost,session['user_id']))
     conn.execute('UPDATE territories SET boats=boats+? WHERE grid_key=?',(am,gk))
     conn.commit(); conn.close()
-    return jsonify({'success':True,'message':f'Built {am} boat(s) for {cost}\u0029 — ready for overseas landing!'})
+    return jsonify({'success':True,'message':f'Built {am} boat(s) for {cost}💰 — ready for overseas landing!'})
 
 @app.route('/api/boats/attack', methods=['POST'])
 @require_login
@@ -1399,6 +1460,20 @@ def admin_remove_territories():
 def admin_reset_game():
     conn = get_db(); do_game_reset(conn); conn.commit(); conn.close()
     return jsonify({'success':True,'message':'Game has been reset!'})
+
+# ── DB backup (admin) ────────────────────────────────────────────────────────
+
+@app.route('/api/admin/export_db')
+@require_admin
+def export_db():
+    import io
+    conn = get_db()
+    buf = io.BytesIO()
+    for chunk in conn.iterdump():
+        buf.write((chunk + '\n').encode())
+    conn.close(); buf.seek(0)
+    from flask import send_file as _sf
+    return _sf(buf, as_attachment=True, download_name='world_conquest_backup.sql', mimetype='text/plain')
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 

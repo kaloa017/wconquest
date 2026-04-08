@@ -442,6 +442,9 @@ select.input-sm option{background:var(--panel3)}
    <div class="pin-hint" style="text-align:center">No PIN set? Contact an admin to reset your password.</div>
   </div>
   <p id="auth-msg"></p>
+  <div style="margin-top:12px;text-align:center">
+   <button class="btn btn-ghost" style="width:100%;opacity:.75;font-size:11px" onclick="startSpectatorMode()">👁 Watch Map Without Logging In</button>
+  </div>
  </div>
 </div>
 
@@ -673,22 +676,22 @@ select.input-sm option{background:var(--panel3)}
 //  CONFIG (mirrors Python)
 // ══════════════════════════════════════════════════
 const GRID = 0.18;
-const WIN_THRESHOLD = 999999; // only triggers when ALL land is claimed
-const CLAIM_COST = 30; // money required to claim a territory
+const WIN_THRESHOLD = 150; // matches server WIN_THRESHOLD
+const CLAIM_COST = 25; // base cost — scales with territory count
 const WIN_COUNTDOWN = 45;
 // Boats & planes are single-use with unlimited range (overseas only)
-const SELL_RATES = {food:1,wood:2,metal:3,oil:5};
-const BOAT_COST = 1000;
-const PLANE_COST = 1000;
+const SELL_RATES = {food:2,wood:4,metal:6,oil:10};
+const BOAT_COST = 800;
+const PLANE_COST = 1200;
 
 const TERRAIN_CFG = {
-  plains:    {icon:'🌾',label:'Plains',   res:'food', rate:6,  color:'#4a7c3f'},
-  forest:    {icon:'🌲',label:'Forest',   res:'wood', rate:8,  color:'#2d5a27'},
-  mountains: {icon:'⛰', label:'Mountains',res:'metal',rate:6,  color:'#6b5b45'},
-  desert:    {icon:'🏜',label:'Desert',   res:'money',rate:4,  color:'#9b7e45'},
-  tundra:    {icon:'❄', label:'Tundra',   res:'metal',rate:3,  color:'#5a7a8a'},
-  city:      {icon:'🏙',label:'City',     res:'money',rate:15, color:'#b8860b'},
-  oil:       {icon:'🛢',label:'Oil Field',res:'oil',  rate:10, color:'#3a3a5a'},
+  plains:    {icon:'🌾',label:'Plains',   res:'food', rate:9,  color:'#4a7c3f'},
+  forest:    {icon:'🌲',label:'Forest',   res:'wood', rate:12, color:'#2d5a27'},
+  mountains: {icon:'⛰', label:'Mountains',res:'metal',rate:9,  color:'#6b5b45'},
+  desert:    {icon:'🏜',label:'Desert',   res:'money',rate:7,  color:'#9b7e45'},
+  tundra:    {icon:'❄', label:'Tundra',   res:'metal',rate:5,  color:'#5a7a8a'},
+  city:      {icon:'🏙',label:'City',     res:'money',rate:18, color:'#b8860b'},
+  oil:       {icon:'🛢',label:'Oil Field',res:'oil',  rate:14, color:'#3a3a5a'},
 };
 const RES_CFG = {
   food: {icon:'🌾',label:'Food'}, wood:  {icon:'🌲',label:'Wood'},
@@ -734,6 +737,8 @@ let mobileView    = 'map';
 let winShowing    = false;
 let winBarTimer   = null;
 let adminUserList = [];
+let spectatorTimer = null;
+let spectatorTimer = null;
 let myAlliances   = []; // [{id, status, ally_id, ally_name, ally_color, is_requester}]
 let seenNotifIds  = new Set();
 
@@ -1004,7 +1009,7 @@ function buildTerritoryPanel(key,t,container){
 
     } else if(canClaim){
       // ── Claim ──
-        const claimCost=(myCount>=300)?1000:30;
+        const claimCost=myCount>=200?1200:myCount>=100?400:myCount>=50?150:myCount>=20?80:myCount>=8?40:25;
         actHTML+=`<div class="claim-block">
           <button class="btn btn-primary btn-full claim-btn" onclick="claimTerritory('${key}')">
             🏴 Claim Territory — ${claimCost}💰 <span class="keybind-hint">C</span>
@@ -1172,12 +1177,35 @@ function updateAtkPreview(targetKey){
 }
 
 
-function troop_cost(rsch){return rsch.has('gunpowder')?8:10}
+function troop_cost(rsch){return rsch.has('gunpowder')?6:8}
 
 // ══════════════════════════════════════════════════
 //  GAME ACTIONS
 // ══════════════════════════════════════════════════
+function requireLogin(action){
+  if(!currentUser){
+    toast('Log in to play! 👆','info');
+    document.getElementById('auth-overlay').style.display='flex';
+    document.getElementById('game-screen').style.display='none';
+    return false;
+  }
+  return true;
+}
+
+function requireLogin(){
+  if(!currentUser){
+    toast('Log in to play!','info');
+    document.getElementById('auth-overlay').style.display='flex';
+    document.getElementById('game-screen').style.display='none';
+    if(spectatorTimer){clearInterval(spectatorTimer);spectatorTimer=null;}
+    return false;
+  }
+  return true;
+}
+
 async function claimTerritory(key){
+  if(!requireLogin())return;
+  if(!requireLogin('claim'))return;
   const[gl,gg]=parseKey(key);
   if(landGeoJSON&&!isLand(gl,gg))return toast('Cannot claim water!','error');
   const r=await api('POST','/api/territory/claim',{grid_key:key});
@@ -1189,6 +1217,8 @@ async function claimTerritory(key){
   await fetchAndBuildPanel(key);
 }
 async function buildTroops(key){
+  if(!requireLogin())return;
+  if(!requireLogin('build'))return;
   const slider=document.getElementById('build-slider');
   const am=parseInt(slider?.value||document.getElementById('build-amt')?.value||1);
   const r=await api('POST','/api/troops/build',{grid_key:key,amount:am});
@@ -1216,6 +1246,8 @@ async function buildPlanes(key){
   toast(r.message,'success');await refreshAll();await fetchAndBuildPanel(key);
 }
 async function attackTerritory(targetKey){
+  if(!requireLogin())return;
+  if(!requireLogin('attack'))return;
   const from=document.getElementById('atk-from')?.value;
   const troops=parseInt(document.getElementById('atk-troops')?.value||1);
   if(!from)return;
@@ -1225,6 +1257,7 @@ async function attackTerritory(targetKey){
   await refreshAll();await fetchAndBuildPanel(targetKey);loadBattleLog();
 }
 async function navalAttack(targetKey){
+  if(!requireLogin())return;
   const from=document.getElementById('boat-from')?.value;
   const boats=parseInt(document.getElementById('boat-troops')?.value||1);
   if(!from)return;
@@ -1234,6 +1267,7 @@ async function navalAttack(targetKey){
   await refreshAll();await fetchAndBuildPanel(targetKey);loadBattleLog();
 }
 async function airAttack(targetKey){
+  if(!requireLogin())return;
   const from=document.getElementById('plane-from')?.value;
   const planes=parseInt(document.getElementById('plane-troops')?.value||1);
   if(!from)return;
@@ -1273,6 +1307,13 @@ async function refreshTerritories(){
   renderTerritories();
 }
 async function refreshAll(){await Promise.all([refreshUser(),refreshTerritories()]);}
+function updateNavbarGuest(){
+  document.getElementById('player-name').textContent='Spectating';
+  document.getElementById('player-dot').style.background='#607090';
+  document.getElementById('rank-badge').textContent='👁 Guest';
+  document.getElementById('resource-bar').innerHTML='<span style="color:var(--text3);font-size:11px;padding:0 8px">👁 View only — <a href="#" onclick="document.getElementById(\'auth-overlay\').style.display=\'flex\';document.getElementById(\'game-screen\').style.display=\'none\';return false" style="color:var(--accent2)">log in to play</a></span>';
+}
+
 function updateNavbar(u){
   document.getElementById('player-name').textContent=u.username;
   document.getElementById('player-dot').style.background=u.color;
@@ -1289,13 +1330,15 @@ async function refreshOnline(){
   document.getElementById('online-count').textContent=list.length;
   if(onlineCollapsed){document.getElementById('online-list').style.display='none';return;}
   document.getElementById('online-list').style.display='block';
-  document.getElementById('online-list').innerHTML=list.map(u=>`
-    <div class="online-row">
-      <span class="online-dot" style="background:${u.color}"></span>
-      <span class="online-name${currentUser&&u.username===currentUser.username?' me':''}">${u.username}</span>
-      ${u.is_admin?'<span class="online-admin">MOD</span>':''}
-      <span class="online-tc">🗺${u.territories}</span>
-    </div>`).join('');
+  document.getElementById('online-list').innerHTML=list.map(u=>{
+    const isMe=currentUser&&u.username===currentUser.username;
+    const isSpec=u.type==='spectator';
+    const dot=isSpec?`<span style="font-size:11px">${u.flag||'🌐'}</span>`:`<span class="online-dot" style="background:${u.color}"></span>`;
+    const name=`<span class="online-name${isMe?' me':''}" title="${isSpec?(u.country||''):''}">` + u.username + `</span>`;
+    const badge=u.is_admin?'<span class="online-admin">MOD</span>':'';
+    const tc=isSpec?'<span class="online-tc" style="font-size:9px">watching</span>':`<span class="online-tc">🗺${u.territories}</span>`;
+    return `<div class="online-row">${dot}${name}${badge}${tc}</div>`;
+  }).join('');
 }
 
 async function pollAnnouncements(){
@@ -1321,7 +1364,7 @@ async function checkGameStatus(){
 function showWinScreen(winner,resetIn){
   winShowing=true;
   document.getElementById('win-player-name').innerHTML=`<span style="color:var(--accent2)">${winner}</span> has conquered the world!`;
-  document.getElementById('win-sub-text').textContent=`${WIN_THRESHOLD} territories claimed. All territory and resources will be reset.`;
+  document.getElementById('win-sub-text').textContent=`${winner} reached ${WIN_THRESHOLD} territories. All territory and resources will be reset.`;
   document.getElementById('win-overlay').classList.add('show');
   let secs=resetIn;
   const bar=document.getElementById('win-bar');
@@ -1640,6 +1683,13 @@ async function doForgotPassword(){
   if(r.error){el.textContent=r.error;el.className='msg-error';return;}
   el.textContent=r.message;el.className='msg-success';
 }
+function updateNavbarGuest(){
+  document.getElementById('player-name').textContent='👁 Spectating';
+  document.getElementById('player-dot').style.background='#607090';
+  document.getElementById('rank-badge').textContent='Guest';
+  document.getElementById('resource-bar').innerHTML='<span style="color:var(--text3);font-size:11px;padding:0 6px">Log in to play</span>';
+}
+
 async function doLogout(){await api('POST','/api/logout');clearInterval(refreshTimer);clearInterval(winCheckTimer);location.reload();}
 
 // ══════════════════════════════════════════════════
@@ -2070,8 +2120,8 @@ document.addEventListener('keydown',async(e)=>{
     if(!t||!t.owner_id){await claimTerritory(selectedKey);}
   }else if(e.key.toLowerCase()==='b'){
     if(t&&t.owner_id===currentUser.id){
-      const ba=document.getElementById('build-amt');
-      if(ba){await buildTroops(selectedKey);}
+      const bs=document.getElementById('build-slider');
+      if(bs){await buildTroops(selectedKey);}
     }
   }else if(e.key==='Escape'){
     selectedKey=null;renderTerritories();
@@ -2084,6 +2134,24 @@ document.addEventListener('keydown',async(e)=>{
 // ══════════════════════════════════════════════════
 //  GAME START
 // ══════════════════════════════════════════════════
+async function startSpectatorMode(){
+  currentUser=null;
+  document.getElementById('auth-overlay').style.display='none';
+  document.getElementById('game-screen').style.display='flex';
+  await new Promise(r=>setTimeout(r,60));
+  initMap();map.invalidateSize();
+  await refreshTerritories();
+  await refreshOnline();
+  // Register spectator presence every 60s
+  api('POST','/api/spectate',{});
+  spectatorTimer=setInterval(()=>{
+    refreshTerritories();refreshOnline();
+    api('POST','/api/spectate',{});
+    pollAnnouncements();
+  },15000);
+  updateNavbarGuest();
+}
+
 async function startGame(user){
   currentUser=user;
   document.getElementById('auth-overlay').style.display='none';
