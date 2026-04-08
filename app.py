@@ -8,40 +8,56 @@ Note: Username 'Kasper' (any case) auto-gets admin on registration
 
 from flask import Flask, request, jsonify, session, send_file
 import sqlite3, hashlib, random, time, os, json, math
-import urllib.request, threading
+import urllib.request, threading, queue
 
-# In-memory spectator tracking {ip: {country, flag, last_seen, name}}
-_spectators = {}
-_geo_cache  = {}          # ip -> {'flag': '🇳🇴', 'country': 'Norway'}
-_geo_lock   = threading.Lock()
+# ── Spectator tracking ────────────────────────────────────────────────────────
+_spectators = {}   # ip -> {flag, country, last_seen}
+_geo_cache  = {}   # ip -> {flag, country}  — persists for process lifetime
+_geo_queue  = queue.Queue()   # IPs to geo-lookup, processed by one background thread
 
 def _country_flag(code):
     if not code or len(code) != 2: return '🌐'
     try: return chr(0x1F1E6+ord(code[0].upper())-65)+chr(0x1F1E6+ord(code[1].upper())-65)
     except: return '🌐'
 
-def _geolocate(ip):
-    """Return {'flag':..,'country':..} for an IP, cached in memory."""
-    if not ip or ip in ('127.0.0.1','::1'): return {'flag':'🖥','country':'Localhost'}
-    with _geo_lock:
-        if ip in _geo_cache: return _geo_cache[ip]
-    try:
-        url = f'http://ip-api.com/json/{ip}?fields=countryCode,country,status'
-        with urllib.request.urlopen(url, timeout=3) as r:
-            data = json.loads(r.read())
-        if data.get('status') == 'success':
-            result = {'flag': _country_flag(data['countryCode']), 'country': data.get('country','?')}
-        else:
-            result = {'flag':'🌐','country':'Unknown'}
-    except:
-        result = {'flag':'🌐','country':'Unknown'}
-    with _geo_lock:
-        _geo_cache[ip] = result
-    return result
+def _geo_worker():
+    """Single long-lived thread that processes geo lookups from the queue."""
+    while True:
+        try:
+            ip = _geo_queue.get(timeout=60)
+            if ip in _geo_cache:
+                _geo_queue.task_done(); continue
+            if ip in ('127.0.0.1', '::1', ''):
+                _geo_cache[ip] = {'flag':'🖥','country':'Localhost','city':''}
+                _geo_queue.task_done(); continue
+            try:
+                url = f'http://ip-api.com/json/{ip}?fields=countryCode,country,city,status'
+                with urllib.request.urlopen(url, timeout=4) as r:
+                    data = json.loads(r.read())
+                if data.get('status') == 'success':
+                    _geo_cache[ip] = {'flag':_country_flag(data['countryCode']), 'country':data.get('country','?'), 'city':data.get('city','')}
+                else:
+                    _geo_cache[ip] = {'flag':'🌐','country':'Unknown'}
+            except:
+                _geo_cache[ip] = {'flag':'🌐','country':'Unknown'}
+            _geo_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception:
+            try: _geo_queue.task_done()
+            except: pass
+
+# Start one persistent worker thread (not a new thread per request)
+_geo_thread = threading.Thread(target=_geo_worker, daemon=True)
+_geo_thread.start()
 
 def _touch_spectator(ip):
-    geo = _geolocate(ip)
-    _spectators[ip] = {**geo, 'last_seen': time.time(), 'ip': ip}
+    """Record a spectator visit. Geo lookup is async via queue."""
+    geo = _geo_cache.get(ip, {'flag':'🌐','country':'?'})
+    _spectators[ip] = {**geo, 'last_seen': time.time()}
+    if ip not in _geo_cache:
+        try: _geo_queue.put_nowait(ip)
+        except queue.Full: pass
 
 
 app = Flask(__name__)
@@ -593,7 +609,7 @@ def spectate():
     """Called by guests to register their presence on the map."""
     ip = request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
     if ip:
-        threading.Thread(target=_touch_spectator, args=(ip,), daemon=True).start()
+        _touch_spectator(ip)  # fast: just dict update, geo is queued async
     return jsonify({'success': True})
 
 @app.route('/api/online')
@@ -616,9 +632,10 @@ def online_users():
     guests = []
     for ip, s in list(_spectators.items()):
         if now - s['last_seen'] < 180:
-            guests.append({'username': f"{s['flag']} Guest", 'color':'#607090',
+            guests.append({'username': f"{s['flag']} {ip}", 'color':'#607090',
                            'is_admin':False,'territories':0,'type':'spectator',
-                           'flag': s['flag'], 'country': s['country']})
+                           'flag': s['flag'], 'country': s.get('country','?'),
+                           'city': s.get('city',''), 'ip': ip})
     return jsonify(players + guests)
 
 # ── Sell resources ────────────────────────────────────────────────────────────
@@ -1487,4 +1504,6 @@ if __name__ == '__main__':
     print("  Auto-mod:  Register as 'Kasper' for admin")
     print(f"  Win at  :  {WIN_THRESHOLD} territories")
     print("="*56 + "\n")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    # use_reloader=False avoids multiprocessing semaphore leaks in dev
+    app.run(debug=True, host='0.0.0.0', port=port, use_reloader=False)
