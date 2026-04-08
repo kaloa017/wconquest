@@ -1310,14 +1310,14 @@ async function refreshOnline(){
   if(onlineCollapsed){document.getElementById('online-list').style.display='none';return;}
   document.getElementById('online-list').style.display='block';
   document.getElementById('online-list').innerHTML=list.map(u=>{
-     const isMe=currentUser&&u.username===currentUser.username;
-     const isSpec=u.type==='spectator';
-     const dot=isSpec?`<span style="font-size:11px">${u.flag||'🌐'}</span>`:`<span class="online-dot" style="background:${u.color}"></span>`;
-     const tooltip=isSpec?[u.city,u.country].filter(Boolean).join(', ')+(u.ip?` (${u.ip})`:''):'';
-     const name=`<span class="online-name${isMe?' me':''}" title="${tooltip}" style="${isSpec?'font-family:monospace;font-size:11px;color:#8ab0c8':''}">` + u.username + `</span>`;
-     const badge=u.is_admin?'<span class="online-admin">MOD</span>':'';
-     const tc=isSpec?'<span class="online-tc" style="font-size:9px;color:#506080">👁 watching</span>':`<span class="online-tc">🗺${u.territories}</span>`;
-     return `<div class="online-row">${dot}${name}${badge}${tc}</div>`;
+    const isMe=currentUser&&u.username===currentUser.username;
+    const isSpec=u.type==='spectator';
+    const dot=isSpec?`<span style="font-size:11px">${u.flag||'🌐'}</span>`:`<span class="online-dot" style="background:${u.color}"></span>`;
+    const name=`<span class="online-name${isMe?' me':''}" title="${isSpec?(u.country||''):''}">` + u.username + `</span>`;
+    const badge=u.is_admin?'<span class="online-admin">MOD</span>':'';
+    const tc=isSpec?'<span class="online-tc" style="font-size:9px">watching</span>':`<span class="online-tc">🗺${u.territories}</span>`;
+    return `<div class="online-row">${dot}${name}${badge}${tc}</div>`;
+  }).join('');
 }
 
 async function pollAnnouncements(){
