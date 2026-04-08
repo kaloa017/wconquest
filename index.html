@@ -738,7 +738,6 @@ let winShowing    = false;
 let winBarTimer   = null;
 let adminUserList = [];
 let spectatorTimer = null;
-let spectatorTimer = null;
 let myAlliances   = []; // [{id, status, ally_id, ally_name, ally_color, is_requester}]
 let seenNotifIds  = new Set();
 
@@ -1182,16 +1181,6 @@ function troop_cost(rsch){return rsch.has('gunpowder')?6:8}
 // ══════════════════════════════════════════════════
 //  GAME ACTIONS
 // ══════════════════════════════════════════════════
-function requireLogin(action){
-  if(!currentUser){
-    toast('Log in to play! 👆','info');
-    document.getElementById('auth-overlay').style.display='flex';
-    document.getElementById('game-screen').style.display='none';
-    return false;
-  }
-  return true;
-}
-
 function requireLogin(){
   if(!currentUser){
     toast('Log in to play!','info');
@@ -1205,7 +1194,6 @@ function requireLogin(){
 
 async function claimTerritory(key){
   if(!requireLogin())return;
-  if(!requireLogin('claim'))return;
   const[gl,gg]=parseKey(key);
   if(landGeoJSON&&!isLand(gl,gg))return toast('Cannot claim water!','error');
   const r=await api('POST','/api/territory/claim',{grid_key:key});
@@ -1218,7 +1206,6 @@ async function claimTerritory(key){
 }
 async function buildTroops(key){
   if(!requireLogin())return;
-  if(!requireLogin('build'))return;
   const slider=document.getElementById('build-slider');
   const am=parseInt(slider?.value||document.getElementById('build-amt')?.value||1);
   const r=await api('POST','/api/troops/build',{grid_key:key,amount:am});
@@ -1247,7 +1234,6 @@ async function buildPlanes(key){
 }
 async function attackTerritory(targetKey){
   if(!requireLogin())return;
-  if(!requireLogin('attack'))return;
   const from=document.getElementById('atk-from')?.value;
   const troops=parseInt(document.getElementById('atk-troops')?.value||1);
   if(!from)return;
@@ -1307,13 +1293,6 @@ async function refreshTerritories(){
   renderTerritories();
 }
 async function refreshAll(){await Promise.all([refreshUser(),refreshTerritories()]);}
-function updateNavbarGuest(){
-  document.getElementById('player-name').textContent='Spectating';
-  document.getElementById('player-dot').style.background='#607090';
-  document.getElementById('rank-badge').textContent='👁 Guest';
-  document.getElementById('resource-bar').innerHTML='<span style="color:var(--text3);font-size:11px;padding:0 8px">👁 View only — <a href="#" onclick="document.getElementById(\'auth-overlay\').style.display=\'flex\';document.getElementById(\'game-screen\').style.display=\'none\';return false" style="color:var(--accent2)">log in to play</a></span>';
-}
-
 function updateNavbar(u){
   document.getElementById('player-name').textContent=u.username;
   document.getElementById('player-dot').style.background=u.color;
